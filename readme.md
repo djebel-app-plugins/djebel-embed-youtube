@@ -1,0 +1,118 @@
+# Djebel Embed YouTube
+
+Converts standalone YouTube links in Djebel static Markdown content into responsive,
+privacy-enhanced video players. It is intentionally small: no JavaScript, no stylesheet,
+no API request, and no configuration are required.
+
+## Usage
+
+Put a YouTube URL on its own Markdown line, with a blank line around it:
+
+```markdown
+Text before the video.
+
+https://youtu.be/dQw4w9WgXcQ
+
+Text after the video.
+```
+
+The URL-only paragraph becomes an iframe using:
+
+```text
+https://youtube-nocookie.com/embed/dQw4w9WgXcQ
+```
+
+Inline links, links with custom Markdown labels, lists, blockquotes, code blocks, and
+playlist-only URLs stay as normal links or text.
+
+## Supported video URLs
+
+- `https://youtube.com/watch?v=VIDEO_ID`
+- `https://youtu.be/VIDEO_ID`
+- `https://youtube.com/embed/VIDEO_ID`
+- `https://youtube.com/shorts/VIDEO_ID`
+- `https://youtube.com/live/VIDEO_ID`
+- `https://youtube.com/v/VIDEO_ID`
+- The same supported routes on the `www`, `m`, and `music` input hosts, plus
+  `youtube-nocookie.com`
+
+Both HTTP and HTTPS input links are accepted. Every generated player uses HTTPS and the
+privacy-enhanced `youtube-nocookie.com` domain without `www`.
+
+## Player parameters
+
+Supported values are validated before being copied to the embed URL:
+
+- Boolean controls: `autoplay`, `cc_load_policy`, `controls`, `disablekb`, `fs`,
+  `loop`, `playsinline`, `rel`
+- Player choices: `color`, `iv_load_policy`
+- Languages: `cc_lang_pref`, `hl`
+- Times: `start`, `end`; shared-link `t` and `time_continue` are normalized to `start`
+
+Times can be seconds or compact durations such as `1m30s`. A single-video `loop=1`
+automatically adds the same video ID as YouTube's required playlist value.
+
+Source playlists, playlist-only URLs, tracking parameters (`si`, `feature`, `utm_*`,
+and similar values), deprecated parameters, and unknown parameters are not forwarded.
+
+## Smart iframe defaults
+
+Each iframe receives:
+
+- Responsive 16:9 inline layout
+- `loading="lazy"`
+- `width="560"` and `height="315"`
+- `title="YouTube video player"`
+- Standard player permissions and fullscreen support
+- `referrerpolicy="strict-origin-when-cross-origin"`
+- `djebel-plugin-embed-youtube-iframe` CSS class
+
+Another plugin can modify, add, or remove these attributes through
+`app.plugin.embed_youtube.iframe_attributes`. The filter receives the attribute array and
+context containing `original_url`, `video_id`, and `player_params`.
+
+```php
+class My_Youtube_Embed_Customizer
+{
+    public function filterIframeAttributes($attributes, $ctx = [])
+    {
+        $attributes['loading'] = 'eager';
+        $attributes['data-video-id'] = $ctx['video_id'];
+
+        return $attributes;
+    }
+}
+
+$obj = new My_Youtube_Embed_Customizer();
+Dj_App_Hooks::addFilter('app.plugin.embed_youtube.iframe_attributes', [$obj, 'filterIframeAttributes']);
+```
+
+Set an attribute to `false` or an empty value to omit it. Attribute names are validated,
+and scalar values are escaped before output.
+
+## Why it is efficient
+
+- Runs only for full Markdown files owned by `djebel-static-content`
+- Returns immediately for listings, other Markdown users, and empty content
+- Uses a cheap case-insensitive substring check before invoking regex
+- Performs no network request while rendering
+- Lazy-loads YouTube so an off-screen player does not load immediately
+- Adds no JavaScript, CSS file, or extra site asset request
+
+## Requirements
+
+- PHP 7.4+
+- `djebel-markdown`
+- `djebel-static-content`
+
+## Installation
+
+Install it as a submodule in the site's non-public plugin directory:
+
+```bash
+git submodule add https://github.com/djebel-app-plugins/djebel-embed-youtube.git \
+  .ht_djebel/app/plugins/djebel-embed-youtube
+```
+
+Djebel loads the plugin automatically. The shared addon test runner loads `plugin.php`
+directly, so the plugin does not ship a separate test loader. No `app.ini` entry is needed.
