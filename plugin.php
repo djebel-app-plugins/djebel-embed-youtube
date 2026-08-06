@@ -2,7 +2,7 @@
 /*
 plugin_name: Djebel Embed YouTube
 plugin_uri: https://djebel.com/plugins/djebel-embed-youtube
-description: Converts standalone YouTube links in static Markdown content into privacy-enhanced responsive embeds.
+description: Converts standalone YouTube links in rendered Markdown into privacy-enhanced responsive embeds.
 version: 1.0.0
 load_priority: 20
 tags: youtube, embed, video, markdown
@@ -15,7 +15,7 @@ company_name: Orbisius
 author_uri: https://orbisius.com
 text_domain: djebel-plugin-embed-youtube
 license: gpl2
-requires: djebel-markdown, djebel-static-content
+requires: djebel-markdown
 */
 
 $obj = Djebel_Plugin_Embed_Youtube::getInstance();
@@ -27,10 +27,37 @@ class Djebel_Plugin_Embed_Youtube
     public const VIDEO_ID_MIN_LEN = 6;
     public const VIDEO_ID_MAX_LEN = 32;
 
-    private const MARKER_PREFIX = 'DJEBEL_PLUGIN_EMBED_YOUTUBE_';
-    private const MARKER_SUFFIX = '_END';
+    private const ANCHOR_PREFIX = '<p><a href=';
+    private const ANCHOR_SUFFIX = '</a></p>';
+    private const BLOCKED_CONTAINER_TAGS = [
+        '<ul' => '</ul>',
+        '<ol' => '</ol>',
+        '<blockquote' => '</blockquote>',
+    ];
+    private const VIDEO_ROUTES = [ 'embed', 'shorts', 'live', 'v', ];
+    private const VIDEO_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+    private const BOOLEAN_PARAM_NAMES = [
+        'autoplay',
+        'cc_load_policy',
+        'controls',
+        'disablekb',
+        'fs',
+        'loop',
+        'playsinline',
+        'rel',
+    ];
 
-    private $static_content_plugin_id = 'djebel-static-content';
+    private const BOOLEAN_PARAM_VALUES = [ '0', '1', ];
+    private const IV_LOAD_POLICY_VALUES = [ '1', '3', ];
+    private const LOCALE_PARAM_NAMES = [ 'cc_lang_pref', 'hl', ];
+    private const LOCALE_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+    private const DURATION_PARTS = [
+        'h' => 3600,
+        'm' => 60,
+        's' => 1,
+    ];
+
+    private const ATTRIBUTE_NAME_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_:-';
 
     /**
      * Hooks the plugin into rendered Markdown content.
@@ -39,48 +66,15 @@ class Djebel_Plugin_Embed_Youtube
      */
     public function init()
     {
-        Dj_App_Hooks::addFilter('app.plugins.markdown.pre_process_content', [$this, 'prepareContent']);
+        // Work only with Markdown's rendered output. The content source can be a file,
+        // database or another plugin; this plugin needs no knowledge of its storage.
         Dj_App_Hooks::addFilter('app.plugins.markdown.post_process_content', [$this, 'processContent']);
 
         return true;
     }
 
     /**
-     * Marks supported YouTube URLs that begin at column zero on their own line.
-     *
-     * @param string $content
-     * @param array $ctx
-     * @return string
-     */
-    public function prepareContent($content, $ctx = [])
-    {
-        if (empty($content)) {
-            return $content;
-        }
-
-        if (!$this->isStaticContentContext($ctx)) {
-            return $content;
-        }
-
-        // The usual page pays only one substring scan; regex runs only on YouTube content.
-        if (stripos($content, 'youtu') === false) {
-            return $content;
-        }
-
-        // Column-zero matching excludes lists, blockquotes and indented code. A marker
-        // inside fenced code is not rendered as a paragraph and is restored after parsing.
-        $pattern = '#^(https?://[^\s]*youtu[^\s]*)[ \t]*\r?$#im';
-        $prepared_content = preg_replace_callback($pattern, [$this, 'markYoutubeLink'], $content);
-
-        if (is_null($prepared_content)) {
-            return $content;
-        }
-
-        return $prepared_content;
-    }
-
-    /**
-     * Replaces prepared top-level YouTube paragraphs after Markdown rendering.
+     * Replaces standalone top-level YouTube paragraphs after Markdown rendering.
      *
      * @param string $content
      * @param array $ctx
@@ -88,77 +82,212 @@ class Djebel_Plugin_Embed_Youtube
      */
     public function processContent($content, $ctx = [])
     {
-        if (empty($content) || (strpos($content, self::MARKER_PREFIX) === false)) {
+        if (empty($content)) {
             return $content;
         }
 
-        if (!$this->isStaticContentContext($ctx)) {
+        // Most content exits after one cheap scan, without line parsing or URL work.
+        if (stripos($content, 'youtu') === false) {
             return $content;
         }
 
-        $marker_pattern = preg_quote(self::MARKER_PREFIX, '#');
-        $marker_suffix_pattern = preg_quote(self::MARKER_SUFFIX, '#');
-        $paragraph_pattern = '#<p>\s*' . $marker_pattern . '([\da-f]+)' . $marker_suffix_pattern . '\s*</p>#i';
-        $processed_content = preg_replace_callback($paragraph_pattern, [$this, 'replaceYoutubeMarker'], $content);
-
-        if (is_null($processed_content)) {
+        // If Markdown did not emit an auto-linked paragraph, no row can be embedded.
+        if (strpos($content, self::ANCHOR_PREFIX) === false) {
             return $content;
         }
 
-        // Restore markers that Markdown kept inside fenced code or another non-paragraph context.
-        $marker_restore_pattern = '#' . $marker_pattern . '([\da-f]+)' . $marker_suffix_pattern . '#i';
-        $restored_content = preg_replace_callback($marker_restore_pattern, [$this, 'restoreYoutubeMarker'], $processed_content);
+        $content_len = strlen($content);
+        $anchor_prefix_len = strlen(self::ANCHOR_PREFIX);
+        $blocked_container_tags = [];
 
-        if (is_null($restored_content)) {
+        // Derive tag lengths once after the cheap gates; the row loop must not
+        // recalculate fixed metadata for every line in the rendered document.
+        foreach (self::BLOCKED_CONTAINER_TAGS as $opening_prefix => $closing_tag) {
+            $blocked_container_tags[] = [
+                'opening_prefix' => $opening_prefix,
+                'opening_prefix_len' => strlen($opening_prefix),
+                'closing_tag' => $closing_tag,
+                'closing_tag_len' => strlen($closing_tag),
+            ];
+        }
+
+        $line_start_pos = 0;
+        $copy_start_pos = 0;
+        $blocked_container_depth = 0;
+        $processed_content = '';
+        $has_replacement = false;
+
+        // Walk newline offsets instead of explode(): ordinary rows are never copied.
+        // Container depth prevents loose list and blockquote paragraphs from embedding.
+        while ($line_start_pos < $content_len) {
+            $line_end_pos = strpos($content, "\n", $line_start_pos);
+
+            if ($line_end_pos === false) {
+                // strpos() returns false for the final row when the buffer has no
+                // trailing newline. Treat the buffer end as that row's boundary.
+                $line_end_pos = $content_len;
+            }
+
+            $line_len = $line_end_pos - $line_start_pos;
+            $is_opening_container = false;
+            $is_closing_container = false;
+
+            foreach ($blocked_container_tags as $container_tag) {
+                $opening_prefix = $container_tag['opening_prefix'];
+                $opening_prefix_len = $container_tag['opening_prefix_len'];
+                $closing_tag = $container_tag['closing_tag'];
+                $closing_tag_len = $container_tag['closing_tag_len'];
+
+                if ($line_len == $closing_tag_len) {
+                    $is_closing_container = substr_compare(
+                        $content,
+                        $closing_tag,
+                        $line_start_pos,
+                        $closing_tag_len
+                    ) == 0;
+                }
+
+                if ($is_closing_container) {
+                    break;
+                }
+
+                if ($line_len <= $opening_prefix_len) {
+                    continue;
+                }
+
+                $has_opening_prefix = substr_compare(
+                    $content,
+                    $opening_prefix,
+                    $line_start_pos,
+                    $opening_prefix_len
+                ) == 0;
+
+                if (!$has_opening_prefix) {
+                    continue;
+                }
+
+                // This byte offset inspects ASCII HTML syntax, never UTF-8 user text.
+                // Requiring a boundary keeps <ol from matching a tag such as <old-tag>.
+                $tag_boundary_pos = $line_start_pos + $opening_prefix_len;
+                $tag_boundary = $content[$tag_boundary_pos];
+                $is_opening_container = $tag_boundary == '>' || ctype_space($tag_boundary);
+
+                if ($is_opening_container) {
+                    break;
+                }
+            }
+
+            if ($is_opening_container) {
+                $blocked_container_depth++;
+            } elseif ($is_closing_container) {
+                if ($blocked_container_depth > 0) {
+                    $blocked_container_depth--;
+                }
+            } elseif ($blocked_container_depth == 0 && $line_len > $anchor_prefix_len) {
+                $has_anchor_prefix = substr_compare(
+                    $content,
+                    self::ANCHOR_PREFIX,
+                    $line_start_pos,
+                    $anchor_prefix_len
+                ) == 0;
+
+                if ($has_anchor_prefix) {
+                    $content_line = substr($content, $line_start_pos, $line_len);
+
+                    if (stripos($content_line, 'youtu') !== false) {
+                        $replacement = $this->replaceYoutubeOutputLine($content_line);
+
+                        if ($replacement != $content_line) {
+                            $copy_len = $line_start_pos - $copy_start_pos;
+                            $processed_content .= substr($content, $copy_start_pos, $copy_len);
+                            $processed_content .= $replacement;
+                            // Copy from the row ending next so its newline and every
+                            // untouched row remain byte-for-byte identical.
+                            $copy_start_pos = $line_end_pos;
+                            $has_replacement = true;
+                        }
+                    }
+                }
+            }
+
+            if ($line_end_pos == $content_len) {
+                break;
+            }
+
+            $line_start_pos = $line_end_pos + 1;
+        }
+
+        if (!$has_replacement) {
             return $content;
         }
 
-        return $restored_content;
+        $processed_content .= substr($content, $copy_start_pos);
+
+        return $processed_content;
     }
 
     /**
-     * Converts one supported URL into a parser-safe marker.
+     * Replaces one exact URL-only paragraph emitted by Markdown.
      *
-     * @param array $matches
+     * @param string $content_line
      * @return string
      */
-    public function markYoutubeLink($matches)
+    public function replaceYoutubeOutputLine($content_line)
     {
-        $original_url = $matches[0];
-        $url = $matches[1];
+        $anchor_prefix_len = strlen(self::ANCHOR_PREFIX);
+        $anchor_suffix_len = strlen(self::ANCHOR_SUFFIX);
+        $content_line_len = strlen($content_line);
+
+        if (strpos($content_line, self::ANCHOR_PREFIX) !== 0) {
+            return $content_line;
+        }
+
+        if ($content_line_len <= $anchor_prefix_len) {
+            return $content_line;
+        }
+
+        // ANCHOR_PREFIX is ASCII HTML syntax, so this byte offset cannot split
+        // English, Bulgarian or any other UTF-8 text in the URL label.
+        $quote_char = $content_line[$anchor_prefix_len];
+
+        if ($quote_char != '"' && $quote_char != "'") {
+            return $content_line;
+        }
+
+        $quote_char_len = strlen($quote_char);
+        $url_start_pos = $anchor_prefix_len + $quote_char_len;
+        $href_end_marker = $quote_char . '>';
+        $href_end_marker_len = strlen($href_end_marker);
+        $href_end_pos = strpos($content_line, $href_end_marker, $url_start_pos);
+
+        if ($href_end_pos === false) {
+            return $content_line;
+        }
+
+        $anchor_suffix_pos = strrpos($content_line, self::ANCHOR_SUFFIX);
+        $expected_suffix_pos = $content_line_len - $anchor_suffix_len;
+
+        if ($anchor_suffix_pos !== $expected_suffix_pos) {
+            return $content_line;
+        }
+
+        $url_len = $href_end_pos - $url_start_pos;
+        $url = substr($content_line, $url_start_pos, $url_len);
+        $label_start_pos = $href_end_pos + $href_end_marker_len;
+        $label_len = $anchor_suffix_pos - $label_start_pos;
+        $label = substr($content_line, $label_start_pos, $label_len);
+
+        if ($url != $label) {
+            return $content_line;
+        }
+
+        $url = Dj_App_HTML::decodeEntities($url);
         $url = Dj_App_String_Util::trim($url);
 
         $video_data = $this->parseVideoUrl($url);
 
         if (empty($video_data)) {
-            return $original_url;
-        }
-
-        $url_hex = bin2hex($url);
-        $marker = self::MARKER_PREFIX . $url_hex . self::MARKER_SUFFIX;
-
-        return $marker;
-    }
-
-    /**
-     * Replaces one validated marker paragraph with an iframe.
-     *
-     * @param array $matches
-     * @return string
-     */
-    public function replaceYoutubeMarker($matches)
-    {
-        $original_html = $matches[0];
-        $url = hex2bin($matches[1]);
-
-        if ($url === false) {
-            return $original_html;
-        }
-
-        $video_data = $this->parseVideoUrl($url);
-
-        if (empty($video_data)) {
-            return $original_html;
+            return $content_line;
         }
 
         $embed_params = [
@@ -169,69 +298,10 @@ class Djebel_Plugin_Embed_Youtube
         $embed_html = $this->buildEmbedHtml($embed_params);
 
         if (empty($embed_html)) {
-            return $original_html;
+            return $content_line;
         }
 
         return $embed_html;
-    }
-
-    /**
-     * Restores a marker that Markdown did not turn into a top-level paragraph.
-     *
-     * @param array $matches
-     * @return string
-     */
-    public function restoreYoutubeMarker($matches)
-    {
-        $url = hex2bin($matches[1]);
-
-        if ($url === false) {
-            return $matches[0];
-        }
-
-        $url_escaped = Dj_App_HTML::escHtml($url);
-
-        return $url_escaped;
-    }
-
-    /**
-     * Checks whether Markdown belongs to a full static-content file.
-     *
-     * @param array $ctx
-     * @return bool
-     */
-    private function isStaticContentContext($ctx = [])
-    {
-        if (empty($ctx['full']) || empty($ctx['file'])) {
-            return false;
-        }
-
-        $file = Dj_App_File_Util::normalizePath($ctx['file']);
-        $data_dir_params = [
-            'plugin' => $this->static_content_plugin_id,
-        ];
-        $content_data_dir = Dj_App_Util::getContentDataDir($data_dir_params);
-        $private_data_dir = Dj_App_Util::getCorePrivateDataDir($data_dir_params);
-        $static_content_dirs = [
-            $content_data_dir,
-            $private_data_dir,
-        ];
-
-        foreach ($static_content_dirs as $static_content_dir) {
-            if (empty($static_content_dir)) {
-                continue;
-            }
-
-            $static_content_dir = Dj_App_File_Util::normalizePath($static_content_dir);
-            $static_content_dir = rtrim($static_content_dir, '/');
-            $static_content_dir .= '/';
-
-            if (strpos($file, $static_content_dir) === 0) {
-                return true;
-            }
-        }
-
-        return false;
     }
 
     /**
@@ -254,26 +324,32 @@ class Djebel_Plugin_Embed_Youtube
 
         $scheme = strtolower($url_parts['scheme']);
 
-        if ($scheme !== 'http' && $scheme !== 'https') {
+        if ($scheme != 'http' && $scheme != 'https') {
             return [];
         }
 
         $host = strtolower($url_parts['host']);
         $host = rtrim($host, '.');
-        $short_hosts = [ 'youtu.be', 'www.youtu.be', ];
-        $youtube_hosts = [
-            'youtube.com',
-            'www.youtube.com',
-            'm.youtube.com',
-            'music.youtube.com',
-            'youtube-nocookie.com',
-            'www.youtube-nocookie.com',
-        ];
-        $is_short_host = in_array($host, $short_hosts);
-        $is_youtube_host = in_array($host, $youtube_hosts);
+        $is_short_host = false;
 
-        if (!$is_short_host && !$is_youtube_host) {
-            return [];
+        // One dispatch validates the host and identifies short links; no host is
+        // searched through two separate lists.
+        switch ($host) {
+            case 'youtu.be':
+            case 'www.youtu.be':
+                $is_short_host = true;
+                break;
+
+            case 'youtube.com':
+            case 'www.youtube.com':
+            case 'm.youtube.com':
+            case 'music.youtube.com':
+            case 'youtube-nocookie.com':
+            case 'www.youtube-nocookie.com':
+                break;
+
+            default:
+                return [];
         }
 
         $url_path = empty($url_parts['path']) ? '' : $url_parts['path'];
@@ -284,32 +360,32 @@ class Djebel_Plugin_Embed_Youtube
             $path_segments = explode('/', $url_path);
         }
 
+        $query_string = empty($url_parts['query']) ? '' : $url_parts['query'];
         $query_params = [];
-
-        if (!empty($url_parts['query'])) {
-            parse_str($url_parts['query'], $query_params);
-        }
-
+        $query_is_parsed = false;
         $video_id = '';
 
         if ($is_short_host) {
             $path_segment_count = count($path_segments);
 
-            if ($path_segment_count === 1) {
+            if ($path_segment_count == 1) {
                 $video_id = $path_segments[0];
             }
         } elseif (!empty($path_segments)) {
             $route = strtolower($path_segments[0]);
             $path_segment_count = count($path_segments);
 
-            if ($route === 'watch' && $path_segment_count === 1) {
+            if ($route == 'watch' && $path_segment_count == 1) {
+                if (!empty($query_string)) {
+                    parse_str($query_string, $query_params);
+                    $query_is_parsed = true;
+                }
+
                 $video_id = empty($query_params['v']) ? '' : $query_params['v'];
             } else {
-                $video_routes = [ 'embed', 'shorts', 'live', 'v', ];
+                $is_video_route = in_array($route, self::VIDEO_ROUTES);
 
-                $is_video_route = in_array($route, $video_routes);
-
-                if ($is_video_route && $path_segment_count === 2) {
+                if ($is_video_route && $path_segment_count == 2) {
                     $video_id = $path_segments[1];
                 }
             }
@@ -327,17 +403,28 @@ class Djebel_Plugin_Embed_Youtube
             return [];
         }
 
-        $valid_video_id = preg_match('#^[\w-]+$#D', $video_id);
+        $valid_video_id_len = strspn($video_id, self::VIDEO_ID_CHARS);
 
-        if ($valid_video_id !== 1) {
+        if ($valid_video_id_len != $video_id_len) {
             return [];
         }
 
-        $player_params_data = [
-            'query_params' => $query_params,
-            'video_id' => $video_id,
-        ];
-        $player_params = $this->normalizePlayerParams($player_params_data);
+        // watch needed its query to find v; other routes parse only after their ID is valid.
+        if (!$query_is_parsed && !empty($query_string)) {
+            parse_str($query_string, $query_params);
+        }
+
+        $player_params = [];
+
+        // A plain video URL has nothing to normalize. Avoid parameter loops and
+        // time parsing unless the source URL actually supplied a query string.
+        if (!empty($query_params)) {
+            $player_params_data = [
+                'query_params' => $query_params,
+                'video_id' => $video_id,
+            ];
+            $player_params = $this->normalizePlayerParams($player_params_data);
+        }
 
         return [
             'video_id' => $video_id,
@@ -356,26 +443,19 @@ class Djebel_Plugin_Embed_Youtube
         $query_params = empty($params['query_params']) ? [] : (array) $params['query_params'];
         $video_id = empty($params['video_id']) ? '' : $params['video_id'];
         $player_params = [];
-        $boolean_param_names = [
-            'autoplay',
-            'cc_load_policy',
-            'controls',
-            'disablekb',
-            'fs',
-            'loop',
-            'playsinline',
-            'rel',
-        ];
-        $valid_boolean_values = [ '0', '1', ];
 
-        foreach ($boolean_param_names as $param_name) {
+        if (empty($query_params)) {
+            return $player_params;
+        }
+
+        foreach (self::BOOLEAN_PARAM_NAMES as $param_name) {
             if (!isset($query_params[$param_name]) || !is_scalar($query_params[$param_name])) {
                 continue;
             }
 
             $param_value = (string) $query_params[$param_name];
 
-            if (!in_array($param_value, $valid_boolean_values)) {
+            if (!in_array($param_value, self::BOOLEAN_PARAM_VALUES)) {
                 continue;
             }
 
@@ -386,7 +466,7 @@ class Djebel_Plugin_Embed_Youtube
             $color = (string) $query_params['color'];
             $color = strtolower($color);
 
-            if ($color === 'red' || $color === 'white') {
+            if ($color == 'red' || $color == 'white') {
                 $player_params['color'] = $color;
             }
         }
@@ -394,54 +474,61 @@ class Djebel_Plugin_Embed_Youtube
         if (!empty($query_params['iv_load_policy']) && is_scalar($query_params['iv_load_policy'])) {
             $iv_load_policy = (string) $query_params['iv_load_policy'];
 
-            $valid_iv_load_policy_values = [ '1', '3', ];
-
-            if (in_array($iv_load_policy, $valid_iv_load_policy_values)) {
+            if (in_array($iv_load_policy, self::IV_LOAD_POLICY_VALUES)) {
                 $player_params['iv_load_policy'] = $iv_load_policy;
             }
         }
 
-        $locale_param_names = [ 'cc_lang_pref', 'hl', ];
-
-        foreach ($locale_param_names as $param_name) {
+        foreach (self::LOCALE_PARAM_NAMES as $param_name) {
             if (empty($query_params[$param_name]) || !is_scalar($query_params[$param_name])) {
                 continue;
             }
 
             $locale = (string) $query_params[$param_name];
-            $valid_locale = preg_match('#^[\w-]{2,35}$#D', $locale);
+            $locale_len = strlen($locale);
 
-            if ($valid_locale === 1) {
-                $player_params[$param_name] = $locale;
+            if ($locale_len < 2 || $locale_len > 35) {
+                continue;
             }
+
+            $valid_locale_len = strspn($locale, self::LOCALE_CHARS);
+
+            if ($valid_locale_len != $locale_len) {
+                continue;
+            }
+
+            $player_params[$param_name] = $locale;
         }
 
         $start_value = '';
+        $has_start_value = false;
 
         if (isset($query_params['start']) && is_scalar($query_params['start'])) {
             $start_value = $query_params['start'];
+            $has_start_value = true;
         } elseif (isset($query_params['t']) && is_scalar($query_params['t'])) {
             $start_value = $query_params['t'];
+            $has_start_value = true;
         } elseif (isset($query_params['time_continue']) && is_scalar($query_params['time_continue'])) {
             $start_value = $query_params['time_continue'];
+            $has_start_value = true;
         }
 
-        $start = $this->parseTime($start_value);
+        if ($has_start_value) {
+            $start = $this->parseTime($start_value);
 
-        if ($start >= 0) {
-            $player_params['start'] = $start;
+            if ($start >= 0) {
+                $player_params['start'] = $start;
+            }
         }
-
-        $end_value = '';
 
         if (isset($query_params['end']) && is_scalar($query_params['end'])) {
             $end_value = $query_params['end'];
-        }
+            $end = $this->parseTime($end_value);
 
-        $end = $this->parseTime($end_value);
-
-        if ($end >= 0) {
-            $player_params['end'] = $end;
+            if ($end >= 0) {
+                $player_params['end'] = $end;
+            }
         }
 
         // YouTube requires playlist=VIDEO_ID for a single video to loop.
@@ -465,7 +552,6 @@ class Djebel_Plugin_Embed_Youtube
         }
 
         $value = (string) $value;
-        $value = strtolower($value);
 
         if (ctype_digit($value)) {
             $seconds = (int) $value;
@@ -473,17 +559,32 @@ class Djebel_Plugin_Embed_Youtube
             return $seconds;
         }
 
-        $matches = [];
-        $matched = preg_match('#^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$#D', $value, $matches);
+        $remaining_value = $value;
+        $total = 0;
+        $has_duration_part = false;
 
-        if ($matched !== 1 || count($matches) === 1) {
-            return -1;
+        foreach (self::DURATION_PARTS as $unit => $multiplier) {
+            $unit_pos = strpos($remaining_value, $unit);
+
+            if ($unit_pos === false) {
+                continue;
+            }
+
+            $unit_value = substr($remaining_value, 0, $unit_pos);
+
+            if ($unit_value === '' || !ctype_digit($unit_value)) {
+                return -1;
+            }
+
+            $unit_value = (int) $unit_value;
+            $total += $unit_value * $multiplier;
+            $remaining_value = substr($remaining_value, $unit_pos + 1);
+            $has_duration_part = true;
         }
 
-        $hours = empty($matches[1]) ? 0 : (int) $matches[1];
-        $minutes = empty($matches[2]) ? 0 : (int) $matches[2];
-        $seconds = empty($matches[3]) ? 0 : (int) $matches[3];
-        $total = ($hours * 3600) + ($minutes * 60) + $seconds;
+        if (!$has_duration_part || $remaining_value != '') {
+            return -1;
+        }
 
         return $total;
     }
@@ -532,9 +633,12 @@ class Djebel_Plugin_Embed_Youtube
                 continue;
             }
 
-            $valid_attribute_name = preg_match('#^[a-z][\w:-]*$#iD', $attribute_name);
+            $attribute_name_len = strlen($attribute_name);
+            $valid_attribute_len = strspn($attribute_name, self::ATTRIBUTE_NAME_CHARS);
+            $first_attribute_char = substr($attribute_name, 0, 1);
+            $has_valid_first_char = ctype_alpha($first_attribute_char);
 
-            if ($valid_attribute_name !== 1) {
+            if ($valid_attribute_len != $attribute_name_len || !$has_valid_first_char) {
                 continue;
             }
 
@@ -551,7 +655,7 @@ class Djebel_Plugin_Embed_Youtube
                 continue;
             }
 
-            if ($attribute_name === 'src') {
+            if ($attribute_name == 'src') {
                 $attribute_value = (string) $attribute_value;
                 $attribute_value_escaped = Dj_App_HTML::escUrl($attribute_value);
 
@@ -562,7 +666,7 @@ class Djebel_Plugin_Embed_Youtube
                 $attribute_value_escaped = Dj_App_HTML::escAttr($attribute_value);
             }
 
-            if ($attribute_value_escaped === '') {
+            if ($attribute_value_escaped == '') {
                 continue;
             }
 

@@ -1,6 +1,6 @@
 # Djebel Embed YouTube
 
-Converts standalone YouTube links in Djebel static Markdown content into responsive,
+Converts standalone YouTube links in Djebel Markdown output into responsive,
 privacy-enhanced video players. It is intentionally small: no JavaScript, no stylesheet,
 no API request, and no configuration are required.
 
@@ -92,18 +92,26 @@ and scalar values are escaped before output.
 
 ## Why it is efficient
 
-- Runs only for full Markdown files owned by `djebel-static-content`
-- Returns immediately for listings, other Markdown users, and empty content
-- Uses a cheap case-insensitive substring check before invoking regex
+- Works on rendered Markdown regardless of whether its source is a file, database, or plugin
+- Returns immediately for empty content and output without `youtu`
+- Uses a second cheap anchor-prefix check before scanning output rows
+- Scans newline offsets without allocating an array of every output row
+- Builds a replacement buffer only after finding a valid embed
+- Parses query parameters only after recognizing a supported video route
+- Preserves untouched UTF-8 output, including English and Bulgarian text
+- Uses no regular expressions
 - Performs no network request while rendering
 - Lazy-loads YouTube so an off-screen player does not load immediately
 - Adds no JavaScript, CSS file, or extra site asset request
+
+The plugin uses only Markdown's post-process hook. It scans rendered output rows and
+replaces an exact top-level URL paragraph, while leaving list, quote, code, inline, and
+labelled-link output unchanged. It does not inspect or depend on the content source.
 
 ## Requirements
 
 - PHP 7.4+
 - `djebel-markdown`
-- `djebel-static-content`
 
 ## Installation
 

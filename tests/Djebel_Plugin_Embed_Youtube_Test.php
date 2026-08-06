@@ -1,7 +1,7 @@
 <?php
 /**
- * Unit tests for Djebel_Plugin_Embed_Youtube. The framework and both required
- * plugins are loaded by djebel-app's shared addon test runner.
+ * Unit tests for Djebel_Plugin_Embed_Youtube. The framework and required Markdown
+ * plugin are loaded by djebel-app's shared addon test runner.
  */
 
 use PHPUnit\Framework\TestCase;
@@ -20,27 +20,19 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
 
     protected function tearDown(): void
     {
-        Dj_App_Hooks::removeFilter('app.plugins.markdown.pre_process_content', [$this->plugin_obj, 'prepareContent']);
         Dj_App_Hooks::removeFilter('app.plugins.markdown.post_process_content', [$this->plugin_obj, 'processContent']);
         Dj_App_Hooks::removeFilter('app.plugin.embed_youtube.iframe_attributes', [$this, 'filterIframeAttributes']);
     }
 
     /**
-     * Converts a Markdown fixture with the same context static-content supplies.
+     * Converts a Markdown fixture without assuming where its content came from.
      *
      * @param string $markdown
      * @return string
      */
     private function renderMarkdown($markdown)
     {
-        $data_dir_params = [
-            'plugin' => 'djebel-static-content',
-        ];
-        $static_content_dir = Dj_App_Util::getContentDataDir($data_dir_params);
-        $ctx = [
-            'file' => $static_content_dir . '/blog/test.md',
-            'full' => 1,
-        ];
+        $ctx = [];
         $html = $this->markdown_obj->processMarkdown($markdown, $ctx);
 
         return $html;
@@ -105,6 +97,55 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
 
         $this->assertStringNotContainsString('<iframe ', $html);
         $this->assertStringContainsString('youtube.com/playlist', $html);
+    }
+
+    public function testOrderedLooseListWithStartAttributeRemainsLink()
+    {
+        $url = 'https://youtu.be/dQw4w9WgXcQ';
+        $markdown_lines = [
+            '3. List item',
+            '',
+            "   {$url}",
+        ];
+        $markdown = implode("\n", $markdown_lines);
+        $html = $this->renderMarkdown($markdown);
+
+        $this->assertStringContainsString('<ol start="3">', $html);
+        $this->assertStringNotContainsString('<iframe ', $html);
+        $this->assertStringContainsString($url, $html);
+    }
+
+    public function testRepeatedUrlEmbedsEveryStandaloneParagraph()
+    {
+        $url = 'https://youtu.be/dQw4w9WgXcQ';
+        $markdown_lines = [
+            $url,
+            '',
+            $url,
+        ];
+        $markdown = implode("\n", $markdown_lines);
+        $html = $this->renderMarkdown($markdown);
+        $iframe_count = substr_count($html, '<iframe ');
+
+        $this->assertSame(2, $iframe_count);
+    }
+
+    public function testMixedEnglishAndBulgarianContentIsPreserved()
+    {
+        $url = 'https://youtu.be/dQw4w9WgXcQ';
+        $markdown_lines = [
+            'Български текст преди видеото.',
+            '',
+            $url,
+            '',
+            'English и български текст след видеото.',
+        ];
+        $markdown = implode("\n", $markdown_lines);
+        $html = $this->renderMarkdown($markdown);
+
+        $this->assertStringContainsString('Български текст преди видеото.', $html);
+        $this->assertStringContainsString('English и български текст след видеото.', $html);
+        $this->assertStringContainsString('<iframe ', $html);
     }
 
     public function testDeceptiveHostRemainsLink()
@@ -176,7 +217,7 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
         $this->assertStringNotContainsString('allowfullscreen', $html);
     }
 
-    public function testNonStaticContextRemainsUnchanged()
+    public function testRenderedMarkdownDoesNotDependOnStorageContext()
     {
         $content = '<p><a href="https://youtu.be/dQw4w9WgXcQ">https://youtu.be/dQw4w9WgXcQ</a></p>';
         $ctx = [
@@ -185,7 +226,15 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
         ];
         $processed_content = $this->plugin_obj->processContent($content, $ctx);
 
-        $this->assertSame($content, $processed_content);
+        $this->assertStringContainsString('<iframe ', $processed_content);
+    }
+
+    public function testSingleQuotedRenderedAnchorIsSupported()
+    {
+        $content = "<p><a href='https://youtu.be/dQw4w9WgXcQ'>https://youtu.be/dQw4w9WgXcQ</a></p>";
+        $processed_content = $this->plugin_obj->processContent($content);
+
+        $this->assertStringContainsString('<iframe ', $processed_content);
     }
 
     /**
