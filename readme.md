@@ -65,11 +65,11 @@ standard result contract. Check the status before reading the structured payload
 
 ```php
 $plugin_obj = Djebel_Plugin_Embed_Youtube::getInstance();
-$parse_res = $plugin_obj->parsePlaylistUrl($youtube_url);
+$parse_res_obj = $plugin_obj->parsePlaylistUrl($youtube_url);
 
-if ($parse_res->isSuccess()) {
-    $playlist_id = $parse_res->playlist_id;
-    $player_params = $parse_res->player_params;
+if ($parse_res_obj->isSuccess()) {
+    $playlist_id = $parse_res_obj->playlist_id;
+    $player_params = $parse_res_obj->player_params;
 }
 ```
 

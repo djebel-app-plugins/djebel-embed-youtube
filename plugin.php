@@ -318,30 +318,32 @@ class Djebel_Plugin_Embed_Youtube
         // A playlist is the primary content whenever list= is present. Parse it
         // first so an attached video ID cannot choose the starting video.
         if (strpos($url, 'list=') !== false) {
-            $playlist_res = $this->parsePlaylistUrl($url);
+            $playlist_res_obj = $this->parsePlaylistUrl($url);
 
-            if ($playlist_res->isSuccess()) {
-                $playlist_data = $playlist_res->data();
+            if ($playlist_res_obj->isSuccess()) {
+                $playlist_id = $playlist_res_obj->playlist_id;
+                $player_params = $playlist_res_obj->player_params;
                 $embed_params = [
                     'original_url' => $url,
-                    'playlist_id' => $playlist_data['playlist_id'],
-                    'player_params' => $playlist_data['player_params'],
+                    'playlist_id' => $playlist_id,
+                    'player_params' => $player_params,
                 ];
             }
         }
 
         if (empty($embed_params)) {
-            $video_res = $this->parseVideoUrl($url);
+            $video_res_obj = $this->parseVideoUrl($url);
 
-            if ($video_res->isError()) {
+            if ($video_res_obj->isError()) {
                 return $content_line;
             }
 
-            $video_data = $video_res->data();
+            $video_id = $video_res_obj->video_id;
+            $player_params = $video_res_obj->player_params;
             $embed_params = [
                 'original_url' => $url,
-                'video_id' => $video_data['video_id'],
-                'player_params' => $video_data['player_params'],
+                'video_id' => $video_id,
+                'player_params' => $player_params,
             ];
         }
 
