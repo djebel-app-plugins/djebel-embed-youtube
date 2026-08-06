@@ -99,18 +99,6 @@ class Djebel_Plugin_Embed_Youtube
         $content_len = strlen($content);
         $anchor_prefix_len = strlen(self::ANCHOR_PREFIX);
         $blocked_container_tags = [];
-
-        // Derive tag lengths once after the cheap gates; the row loop must not
-        // recalculate fixed metadata for every line in the rendered document.
-        foreach (self::BLOCKED_CONTAINER_TAGS as $opening_prefix => $closing_tag) {
-            $blocked_container_tags[] = [
-                'opening_prefix' => $opening_prefix,
-                'opening_prefix_len' => strlen($opening_prefix),
-                'closing_tag' => $closing_tag,
-                'closing_tag_len' => strlen($closing_tag),
-            ];
-        }
-
         $line_start_pos = 0;
         $copy_start_pos = 0;
         $blocked_container_depth = 0;
@@ -131,49 +119,84 @@ class Djebel_Plugin_Embed_Youtube
             $line_len = $line_end_pos - $line_start_pos;
             $is_opening_container = false;
             $is_closing_container = false;
+            $is_potential_container = false;
 
-            foreach ($blocked_container_tags as $container_tag) {
-                $opening_prefix = $container_tag['opening_prefix'];
-                $opening_prefix_len = $container_tag['opening_prefix_len'];
-                $closing_tag = $container_tag['closing_tag'];
-                $closing_tag_len = $container_tag['closing_tag_len'];
+            // Inspect ASCII HTML tag bytes only. Most rows begin with <p>, so they
+            // skip all container metadata setup and comparisons.
+            if ($line_len > 1 && $content[$line_start_pos] == '<') {
+                $tag_name_first_byte = $content[$line_start_pos + 1];
+                $is_potential_container = $tag_name_first_byte == 'u';
 
-                if ($line_len == $closing_tag_len) {
-                    $is_closing_container = substr_compare(
+                if (!$is_potential_container) {
+                    $is_potential_container = $tag_name_first_byte == 'o';
+                }
+
+                if (!$is_potential_container) {
+                    $is_potential_container = $tag_name_first_byte == 'b';
+                }
+
+                if (!$is_potential_container) {
+                    $is_potential_container = $tag_name_first_byte == '/';
+                }
+            }
+
+            if ($is_potential_container && empty($blocked_container_tags)) {
+                // Derive lengths once, and only when this document actually contains
+                // a row that could affect list or blockquote depth.
+                foreach (self::BLOCKED_CONTAINER_TAGS as $opening_prefix => $closing_tag) {
+                    $blocked_container_tags[] = [
+                        'opening_prefix' => $opening_prefix,
+                        'opening_prefix_len' => strlen($opening_prefix),
+                        'closing_tag' => $closing_tag,
+                        'closing_tag_len' => strlen($closing_tag),
+                    ];
+                }
+            }
+
+            if ($is_potential_container) {
+                foreach ($blocked_container_tags as $container_tag) {
+                    $opening_prefix = $container_tag['opening_prefix'];
+                    $opening_prefix_len = $container_tag['opening_prefix_len'];
+                    $closing_tag = $container_tag['closing_tag'];
+                    $closing_tag_len = $container_tag['closing_tag_len'];
+
+                    if ($line_len == $closing_tag_len) {
+                        $is_closing_container = substr_compare(
+                            $content,
+                            $closing_tag,
+                            $line_start_pos,
+                            $closing_tag_len
+                        ) == 0;
+                    }
+
+                    if ($is_closing_container) {
+                        break;
+                    }
+
+                    if ($line_len <= $opening_prefix_len) {
+                        continue;
+                    }
+
+                    $has_opening_prefix = substr_compare(
                         $content,
-                        $closing_tag,
+                        $opening_prefix,
                         $line_start_pos,
-                        $closing_tag_len
+                        $opening_prefix_len
                     ) == 0;
-                }
 
-                if ($is_closing_container) {
-                    break;
-                }
+                    if (!$has_opening_prefix) {
+                        continue;
+                    }
 
-                if ($line_len <= $opening_prefix_len) {
-                    continue;
-                }
+                    // This byte offset inspects ASCII HTML syntax, never UTF-8 user text.
+                    // Requiring a boundary keeps <ol from matching a tag such as <old-tag>.
+                    $tag_boundary_pos = $line_start_pos + $opening_prefix_len;
+                    $tag_boundary = $content[$tag_boundary_pos];
+                    $is_opening_container = $tag_boundary == '>' || ctype_space($tag_boundary);
 
-                $has_opening_prefix = substr_compare(
-                    $content,
-                    $opening_prefix,
-                    $line_start_pos,
-                    $opening_prefix_len
-                ) == 0;
-
-                if (!$has_opening_prefix) {
-                    continue;
-                }
-
-                // This byte offset inspects ASCII HTML syntax, never UTF-8 user text.
-                // Requiring a boundary keeps <ol from matching a tag such as <old-tag>.
-                $tag_boundary_pos = $line_start_pos + $opening_prefix_len;
-                $tag_boundary = $content[$tag_boundary_pos];
-                $is_opening_container = $tag_boundary == '>' || ctype_space($tag_boundary);
-
-                if ($is_opening_container) {
-                    break;
+                    if ($is_opening_container) {
+                        break;
+                    }
                 }
             }
 
@@ -234,15 +257,13 @@ class Djebel_Plugin_Embed_Youtube
      */
     public function replaceYoutubeOutputLine($content_line)
     {
-        $anchor_prefix_len = strlen(self::ANCHOR_PREFIX);
-        $anchor_suffix_len = strlen(self::ANCHOR_SUFFIX);
-        $content_line_len = strlen($content_line);
-
         if (strpos($content_line, self::ANCHOR_PREFIX) !== 0) {
             return $content_line;
         }
 
-        if ($content_line_len <= $anchor_prefix_len) {
+        $anchor_prefix_len = strlen(self::ANCHOR_PREFIX);
+
+        if (!isset($content_line[$anchor_prefix_len])) {
             return $content_line;
         }
 
@@ -257,17 +278,24 @@ class Djebel_Plugin_Embed_Youtube
         $quote_char_len = strlen($quote_char);
         $url_start_pos = $anchor_prefix_len + $quote_char_len;
         $href_end_marker = $quote_char . '>';
-        $href_end_marker_len = strlen($href_end_marker);
         $href_end_pos = strpos($content_line, $href_end_marker, $url_start_pos);
 
         if ($href_end_pos === false) {
             return $content_line;
         }
 
+        $href_end_marker_len = strlen($href_end_marker);
         $anchor_suffix_pos = strrpos($content_line, self::ANCHOR_SUFFIX);
+
+        if ($anchor_suffix_pos === false) {
+            return $content_line;
+        }
+
+        $content_line_len = strlen($content_line);
+        $anchor_suffix_len = strlen(self::ANCHOR_SUFFIX);
         $expected_suffix_pos = $content_line_len - $anchor_suffix_len;
 
-        if ($anchor_suffix_pos !== $expected_suffix_pos) {
+        if ($anchor_suffix_pos != $expected_suffix_pos) {
             return $content_line;
         }
 
@@ -441,12 +469,13 @@ class Djebel_Plugin_Embed_Youtube
     public function normalizePlayerParams($params = [])
     {
         $query_params = empty($params['query_params']) ? [] : (array) $params['query_params'];
-        $video_id = empty($params['video_id']) ? '' : $params['video_id'];
         $player_params = [];
 
         if (empty($query_params)) {
             return $player_params;
         }
+
+        $video_id = empty($params['video_id']) ? '' : $params['video_id'];
 
         foreach (self::BOOLEAN_PARAM_NAMES as $param_name) {
             if (!isset($query_params[$param_name]) || !is_scalar($query_params[$param_name])) {
@@ -597,14 +626,14 @@ class Djebel_Plugin_Embed_Youtube
      */
     public function buildEmbedHtml($params = [])
     {
-        $original_url = empty($params['original_url']) ? '' : $params['original_url'];
         $video_id = empty($params['video_id']) ? '' : $params['video_id'];
-        $player_params = empty($params['player_params']) ? [] : (array) $params['player_params'];
 
         if (empty($video_id)) {
             return '';
         }
 
+        $original_url = empty($params['original_url']) ? '' : $params['original_url'];
+        $player_params = empty($params['player_params']) ? [] : (array) $params['player_params'];
         $video_id_encoded = rawurlencode($video_id);
         $embed_url = self::EMBED_BASE_URL . $video_id_encoded;
 
@@ -633,6 +662,10 @@ class Djebel_Plugin_Embed_Youtube
                 continue;
             }
 
+            if ($attribute_value === false || is_null($attribute_value) || $attribute_value === '') {
+                continue;
+            }
+
             $attribute_name_len = strlen($attribute_name);
             $valid_attribute_len = strspn($attribute_name, self::ATTRIBUTE_NAME_CHARS);
             $first_attribute_char = substr($attribute_name, 0, 1);
@@ -644,10 +677,6 @@ class Djebel_Plugin_Embed_Youtube
 
             if ($attribute_value === true) {
                 $attribute_parts[] = $attribute_name;
-                continue;
-            }
-
-            if ($attribute_value === false || is_null($attribute_value) || $attribute_value === '') {
                 continue;
             }
 
