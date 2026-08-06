@@ -23,9 +23,11 @@ Dj_App_Hooks::addAction('app.core.init', [$obj, 'init']);
 
 class Djebel_Plugin_Embed_Youtube
 {
-    public const EMBED_BASE_URL = 'https://youtube-nocookie.com/embed/';
+    public const EMBED_BASE_URL = 'https://youtube-nocookie.com/embed';
     public const VIDEO_ID_MIN_LEN = 6;
     public const VIDEO_ID_MAX_LEN = 32;
+    public const PLAYLIST_ID_MIN_LEN = 10;
+    public const PLAYLIST_ID_MAX_LEN = 128;
 
     private const ANCHOR_PREFIX = '<p><a href=';
     private const ANCHOR_SUFFIX = '</a></p>';
@@ -35,7 +37,7 @@ class Djebel_Plugin_Embed_Youtube
         '<blockquote' => '</blockquote>',
     ];
     private const VIDEO_ROUTES = [ 'embed', 'shorts', 'live', 'v', ];
-    private const VIDEO_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+    private const YOUTUBE_ID_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
     private const BOOLEAN_PARAM_NAMES = [
         'autoplay',
         'cc_load_policy',
@@ -311,18 +313,36 @@ class Djebel_Plugin_Embed_Youtube
 
         $url = Dj_App_HTML::decodeEntities($url);
         $url = Dj_App_String_Util::trim($url);
+        $embed_params = [];
 
-        $video_data = $this->parseVideoUrl($url);
+        // A playlist is the primary content whenever list= is present. Parse it
+        // first so an attached video ID cannot choose the starting video.
+        if (strpos($url, 'list=') !== false) {
+            $playlist_data = $this->parsePlaylistUrl($url);
 
-        if (empty($video_data)) {
-            return $content_line;
+            if (!empty($playlist_data)) {
+                $embed_params = [
+                    'original_url' => $url,
+                    'playlist_id' => $playlist_data['playlist_id'],
+                    'player_params' => $playlist_data['player_params'],
+                ];
+            }
         }
 
-        $embed_params = [
-            'original_url' => $url,
-            'video_id' => $video_data['video_id'],
-            'player_params' => $video_data['player_params'],
-        ];
+        if (empty($embed_params)) {
+            $video_data = $this->parseVideoUrl($url);
+
+            if (empty($video_data)) {
+                return $content_line;
+            }
+
+            $embed_params = [
+                'original_url' => $url,
+                'video_id' => $video_data['video_id'],
+                'player_params' => $video_data['player_params'],
+            ];
+        }
+
         $embed_html = $this->buildEmbedHtml($embed_params);
 
         if (empty($embed_html)) {
@@ -340,45 +360,14 @@ class Djebel_Plugin_Embed_Youtube
      */
     public function parseVideoUrl($url)
     {
-        if (empty($url) || !is_string($url)) {
+        $youtube_url_data = $this->parseYoutubeUrlParts($url);
+
+        if (empty($youtube_url_data)) {
             return [];
         }
 
-        $url_parts = parse_url($url);
-
-        if (empty($url_parts) || empty($url_parts['scheme']) || empty($url_parts['host'])) {
-            return [];
-        }
-
-        $scheme = strtolower($url_parts['scheme']);
-
-        if ($scheme != 'http' && $scheme != 'https') {
-            return [];
-        }
-
-        $host = strtolower($url_parts['host']);
-        $host = rtrim($host, '.');
-        $is_short_host = false;
-
-        // One dispatch validates the host and identifies short links; no host is
-        // searched through two separate lists.
-        switch ($host) {
-            case 'youtu.be':
-            case 'www.youtu.be':
-                $is_short_host = true;
-                break;
-
-            case 'youtube.com':
-            case 'www.youtube.com':
-            case 'm.youtube.com':
-            case 'music.youtube.com':
-            case 'youtube-nocookie.com':
-            case 'www.youtube-nocookie.com':
-                break;
-
-            default:
-                return [];
-        }
+        $url_parts = $youtube_url_data['url_parts'];
+        $is_short_host = $youtube_url_data['is_short_host'];
 
         $url_path = empty($url_parts['path']) ? '' : $url_parts['path'];
         $url_path = Dj_App_String_Util::trim($url_path, '/');
@@ -431,7 +420,7 @@ class Djebel_Plugin_Embed_Youtube
             return [];
         }
 
-        $valid_video_id_len = strspn($video_id, self::VIDEO_ID_CHARS);
+        $valid_video_id_len = strspn($video_id, self::YOUTUBE_ID_CHARS);
 
         if ($valid_video_id_len != $video_id_len) {
             return [];
@@ -442,10 +431,13 @@ class Djebel_Plugin_Embed_Youtube
             parse_str($query_string, $query_params);
         }
 
+        // Routing identifiers have already done their job and are not player
+        // parameters. Removing them lets an ordinary watch?v= URL skip every
+        // normalization loop below.
+        unset($query_params['v'], $query_params['list']);
         $player_params = [];
 
-        // A plain video URL has nothing to normalize. Avoid parameter loops and
-        // time parsing unless the source URL actually supplied a query string.
+        // Avoid parameter loops and time parsing unless candidates remain.
         if (!empty($query_params)) {
             $player_params_data = [
                 'query_params' => $query_params,
@@ -457,6 +449,123 @@ class Djebel_Plugin_Embed_Youtube
         return [
             'video_id' => $video_id,
             'player_params' => $player_params,
+        ];
+    }
+
+    /**
+     * Extracts a playlist ID and supported player parameters from a YouTube URL.
+     *
+     * A list parameter is valid on playlist, watch, short, and embed URLs. The
+     * route and any attached video therefore do not participate in playlist parsing.
+     *
+     * @param string $url
+     * @return array
+     */
+    public function parsePlaylistUrl($url)
+    {
+        $youtube_url_data = $this->parseYoutubeUrlParts($url);
+
+        if (empty($youtube_url_data)) {
+            return [];
+        }
+
+        $url_parts = $youtube_url_data['url_parts'];
+
+        if (empty($url_parts['query'])) {
+            return [];
+        }
+
+        $query_params = [];
+        parse_str($url_parts['query'], $query_params);
+
+        if (empty($query_params['list']) || !is_scalar($query_params['list'])) {
+            return [];
+        }
+
+        // parse_str() has already decoded the query value. Decoding it again could
+        // turn an encoded percent sequence inside an otherwise valid ID into data.
+        $playlist_id = (string) $query_params['list'];
+        $playlist_id_len = strlen($playlist_id);
+
+        if ($playlist_id_len < self::PLAYLIST_ID_MIN_LEN || $playlist_id_len > self::PLAYLIST_ID_MAX_LEN) {
+            return [];
+        }
+
+        $valid_playlist_id_len = strspn($playlist_id, self::YOUTUBE_ID_CHARS);
+
+        if ($valid_playlist_id_len != $playlist_id_len) {
+            return [];
+        }
+
+        // The playlist and attached video select content, not player behavior.
+        // Removing both lets the common watch?v=...&list=... form stop here.
+        unset($query_params['list'], $query_params['v']);
+        $player_params = [];
+
+        if (!empty($query_params)) {
+            $player_params_data = [
+                'query_params' => $query_params,
+            ];
+            $player_params = $this->normalizePlayerParams($player_params_data);
+        }
+
+        return [
+            'playlist_id' => $playlist_id,
+            'player_params' => $player_params,
+        ];
+    }
+
+    /**
+     * Validates a YouTube URL once and returns the parts needed by route parsers.
+     *
+     * @param string $url
+     * @return array
+     */
+    private function parseYoutubeUrlParts($url)
+    {
+        if (empty($url) || !is_string($url)) {
+            return [];
+        }
+
+        $url_parts = parse_url($url);
+
+        if (empty($url_parts) || empty($url_parts['scheme']) || empty($url_parts['host'])) {
+            return [];
+        }
+
+        $scheme = strtolower($url_parts['scheme']);
+
+        if ($scheme != 'http' && $scheme != 'https') {
+            return [];
+        }
+
+        $host = strtolower($url_parts['host']);
+        $host = rtrim($host, '.');
+        $is_short_host = false;
+
+        // One dispatch both validates the host and identifies short links, so a
+        // recognized host is never searched through multiple host collections.
+        switch ($host) {
+            case 'youtu.be':
+            case 'www.youtu.be':
+                $is_short_host = true;
+                break;
+
+            case 'youtube.com':
+            case 'www.youtube.com':
+            case 'm.youtube.com':
+            case 'music.youtube.com':
+            case 'youtube-nocookie.com':
+            case 'www.youtube-nocookie.com':
+                break;
+
+            default:
+                return [];
+        }
+
+        return [
+            'url_parts' => $url_parts,
+            'is_short_host' => $is_short_host,
         ];
     }
 
@@ -621,31 +730,62 @@ class Djebel_Plugin_Embed_Youtube
     /**
      * Builds one escaped privacy-enhanced iframe.
      *
-     * @param array $params original_url, video_id and player_params
+     * @param array $params original_url, video_id or playlist_id, and player_params
      * @return string
      */
     public function buildEmbedHtml($params = [])
     {
-        $video_id = empty($params['video_id']) ? '' : $params['video_id'];
+        $playlist_id = empty($params['playlist_id']) ? '' : $params['playlist_id'];
 
-        if (empty($video_id)) {
-            return '';
+        if (!empty($playlist_id)) {
+            // A playlist is already sufficient; do not inspect or encode a video ID.
+            $content_type = 'playlist';
+            $video_id = '';
+        } else {
+            $video_id = empty($params['video_id']) ? '' : $params['video_id'];
+
+            if (empty($video_id)) {
+                return '';
+            }
+
+            $content_type = 'video';
         }
 
         $original_url = empty($params['original_url']) ? '' : $params['original_url'];
         $player_params = empty($params['player_params']) ? [] : (array) $params['player_params'];
-        $video_id_encoded = rawurlencode($video_id);
-        $embed_url = self::EMBED_BASE_URL . $video_id_encoded;
 
-        if (!empty($player_params)) {
-            $query = http_build_query($player_params, '', '&', PHP_QUERY_RFC3986);
+        if ($content_type == 'playlist') {
+            // The player accepts a playlist without a video path. Keeping the path
+            // empty makes YouTube begin with the first item in the supplied list.
+            $embed_url = self::EMBED_BASE_URL;
+            $embed_query_params = [
+                'listType' => 'playlist',
+                'list' => $playlist_id,
+            ];
+
+            if (!empty($player_params)) {
+                // Required playlist routing values win if a filter adds a colliding
+                // player parameter in the future.
+                $embed_query_params += $player_params;
+            }
+        } else {
+            // Encoding is deferred until the video branch actually needs it.
+            $video_id_encoded = rawurlencode($video_id);
+            $embed_url = self::EMBED_BASE_URL . '/' . $video_id_encoded;
+            $embed_query_params = $player_params;
+        }
+
+        if (!empty($embed_query_params)) {
+            $query = http_build_query($embed_query_params, '', '&', PHP_QUERY_RFC3986);
             $embed_url .= '?' . $query;
         }
 
         $attribute_params = [
             'embed_url' => $embed_url,
             'original_url' => $original_url,
+            'content_type' => $content_type,
             'video_id' => $video_id,
+            'playlist_id' => $playlist_id,
             'player_params' => $player_params,
         ];
         $iframe_attributes = $this->getIframeAttributes($attribute_params);
@@ -717,19 +857,30 @@ class Djebel_Plugin_Embed_Youtube
      *
      * Filter: app.plugin.embed_youtube.iframe_attributes
      *
-     * @param array $params embed_url, original_url, video_id and player_params
+     * @param array $params embed_url, original_url, content identifiers and player_params
      * @return array
      */
     public function getIframeAttributes($params = [])
     {
         $embed_url = empty($params['embed_url']) ? '' : $params['embed_url'];
         $original_url = empty($params['original_url']) ? '' : $params['original_url'];
-        $video_id = empty($params['video_id']) ? '' : $params['video_id'];
+        $content_type = empty($params['content_type']) ? 'video' : $params['content_type'];
         $player_params = empty($params['player_params']) ? [] : (array) $params['player_params'];
+
+        if ($content_type == 'playlist') {
+            // Only read the identifier relevant to the current player type.
+            $playlist_id = empty($params['playlist_id']) ? '' : $params['playlist_id'];
+            $video_id = '';
+            $title = 'YouTube playlist player';
+        } else {
+            $video_id = empty($params['video_id']) ? '' : $params['video_id'];
+            $playlist_id = '';
+            $title = 'YouTube video player';
+        }
         $iframe_attributes = [
             'class' => 'djebel-plugin-embed-youtube-iframe',
             'src' => $embed_url,
-            'title' => 'YouTube video player',
+            'title' => $title,
             'loading' => 'lazy',
             'width' => 560,
             'height' => 315,
@@ -740,7 +891,9 @@ class Djebel_Plugin_Embed_Youtube
         ];
         $ctx = [
             'original_url' => $original_url,
+            'content_type' => $content_type,
             'video_id' => $video_id,
+            'playlist_id' => $playlist_id,
             'player_params' => $player_params,
         ];
         $filtered_attributes = Dj_App_Hooks::applyFilter('app.plugin.embed_youtube.iframe_attributes', $iframe_attributes, $ctx);

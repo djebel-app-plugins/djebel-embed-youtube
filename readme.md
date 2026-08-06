@@ -1,8 +1,8 @@
 # Djebel Embed YouTube
 
-Converts standalone YouTube links in Djebel Markdown output into responsive,
-privacy-enhanced video players. It is intentionally small: no JavaScript, no stylesheet,
-no API request, and no configuration are required.
+Converts standalone YouTube video and playlist links in Djebel Markdown output into
+responsive, privacy-enhanced players. It is intentionally small: no JavaScript, no
+stylesheet, no API request, and no configuration are required.
 
 ## Usage
 
@@ -23,7 +23,7 @@ https://youtube-nocookie.com/embed/dQw4w9WgXcQ
 ```
 
 Inline links, links with custom Markdown labels, lists, blockquotes, code blocks, and
-playlist-only URLs stay as normal links or text.
+other non-standalone URL uses stay as normal links or text.
 
 ## Supported video URLs
 
@@ -39,6 +39,25 @@ playlist-only URLs stay as normal links or text.
 Both HTTP and HTTPS input links are accepted. Every generated player uses HTTPS and the
 privacy-enhanced `youtube-nocookie.com` domain without `www`.
 
+## Supported playlist URLs
+
+Put a playlist URL on its own line in the same way:
+
+```markdown
+https://youtube.com/playlist?list=PLAYLIST_ID
+```
+
+The plugin generates a privacy-enhanced playlist player:
+
+```text
+https://youtube-nocookie.com/embed?listType=playlist&list=PLAYLIST_ID
+```
+
+The `list` parameter is recognized on supported YouTube playlist, watch, short, and
+embed links. When a URL contains both a playlist and a video ID, the playlist takes
+precedence: the video ID is deliberately ignored so playback starts with the playlist's
+first video.
+
 ## Player parameters
 
 Supported values are validated before being copied to the embed URL:
@@ -52,8 +71,8 @@ Supported values are validated before being copied to the embed URL:
 Times can be seconds or compact durations such as `1m30s`. A single-video `loop=1`
 automatically adds the same video ID as YouTube's required playlist value.
 
-Source playlists, playlist-only URLs, tracking parameters (`si`, `feature`, `utm_*`,
-and similar values), deprecated parameters, and unknown parameters are not forwarded.
+Tracking parameters (`si`, `feature`, `utm_*`, and similar values), deprecated
+parameters, and unknown parameters are not forwarded.
 
 ## Smart iframe defaults
 
@@ -62,14 +81,15 @@ Each iframe receives:
 - Responsive 16:9 inline layout
 - `loading="lazy"`
 - `width="560"` and `height="315"`
-- `title="YouTube video player"`
+- A descriptive `YouTube video player` or `YouTube playlist player` title
 - Standard player permissions and fullscreen support
 - `referrerpolicy="strict-origin-when-cross-origin"`
 - `djebel-plugin-embed-youtube-iframe` CSS class
 
 Another plugin can modify, add, or remove these attributes through
 `app.plugin.embed_youtube.iframe_attributes`. The filter receives the attribute array and
-context containing `original_url`, `video_id`, and `player_params`.
+context containing `original_url`, `content_type`, `video_id`, `playlist_id`, and
+`player_params`. Only the identifier for the current content type is populated.
 
 ```php
 class My_Youtube_Embed_Customizer
@@ -77,7 +97,11 @@ class My_Youtube_Embed_Customizer
     public function filterIframeAttributes($attributes, $ctx = [])
     {
         $attributes['loading'] = 'eager';
-        $attributes['data-video-id'] = $ctx['video_id'];
+        $attributes['data-content-type'] = $ctx['content_type'];
+
+        if (!empty($ctx['video_id'])) {
+            $attributes['data-video-id'] = $ctx['video_id'];
+        }
 
         return $attributes;
     }
@@ -97,7 +121,8 @@ and scalar values are escaped before output.
 - Uses a second cheap anchor-prefix check before scanning output rows
 - Scans newline offsets without allocating an array of every output row
 - Builds a replacement buffer only after finding a valid embed
-- Parses query parameters only after recognizing a supported video route
+- Parses a playlist query only after the cheap `list=` and validated-host gates
+- Parses video query parameters only after recognizing a supported video route
 - Preserves untouched UTF-8 output, including English and Bulgarian text
 - Uses no regular expressions
 - Performs no network request while rendering

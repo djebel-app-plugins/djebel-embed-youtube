@@ -90,13 +90,40 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
         $this->assertStringContainsString("<pre><code>{$video_url}</code></pre>", $html);
     }
 
-    public function testPlaylistOnlyUrlRemainsLink()
+    public function testPlaylistOnlyUrlUsesPrivacyEnhancedEmbed()
     {
         $url = 'https://youtube.com/playlist?list=PL1234567890';
         $html = $this->renderMarkdown($url);
 
-        $this->assertStringNotContainsString('<iframe ', $html);
-        $this->assertStringContainsString('youtube.com/playlist', $html);
+        $this->assertStringContainsString('<iframe ', $html);
+        $this->assertStringContainsString(
+            'https://youtube-nocookie.com/embed?listType=playlist&amp;list=PL1234567890',
+            $html
+        );
+        $this->assertStringContainsString('title="YouTube playlist player"', $html);
+        $this->assertStringNotContainsString('www.youtube-nocookie.com', $html);
+    }
+
+    public function testPlaylistTakesPrecedenceAndStartsFromItsFirstVideo()
+    {
+        $video_id = 'dQw4w9WgXcQ';
+        $playlist_id = 'PL1234567890';
+        $urls = [
+            "https://youtube.com/watch?v={$video_id}&list={$playlist_id}",
+            "https://youtu.be/{$video_id}?list={$playlist_id}",
+            "https://youtube.com/embed/{$video_id}?list={$playlist_id}",
+        ];
+
+        foreach ($urls as $url) {
+            $html = $this->renderMarkdown($url);
+
+            $this->assertStringContainsString('<iframe ', $html);
+            $this->assertStringContainsString(
+                "https://youtube-nocookie.com/embed?listType=playlist&amp;list={$playlist_id}",
+                $html
+            );
+            $this->assertStringNotContainsString("/embed/{$video_id}", $html);
+        }
     }
 
     public function testOrderedLooseListWithStartAttributeRemainsLink()
@@ -171,7 +198,7 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
 
     public function testTrackingParametersAreRemoved()
     {
-        $url = 'https://youtube.com/watch?v=dQw4w9WgXcQ&list=PL123&si=tracking&feature=share&utm_source=test&modestbranding=1&unknown=1';
+        $url = 'https://youtube.com/watch?v=dQw4w9WgXcQ&si=tracking&feature=share&utm_source=test&modestbranding=1&unknown=1';
         $html = $this->renderMarkdown($url);
 
         $this->assertStringContainsString('https://youtube-nocookie.com/embed/dQw4w9WgXcQ', $html);
@@ -185,12 +212,11 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
 
     public function testSingleVideoLoopGetsRequiredPlaylistValue()
     {
-        $url = 'https://youtu.be/dQw4w9WgXcQ?loop=1&list=PL-ignored';
+        $url = 'https://youtu.be/dQw4w9WgXcQ?loop=1';
         $html = $this->renderMarkdown($url);
 
         $this->assertStringContainsString('loop=1', $html);
         $this->assertStringContainsString('playlist=dQw4w9WgXcQ', $html);
-        $this->assertStringNotContainsString('PL-ignored', $html);
     }
 
     public function testIframeUsesSmartDefaults()
@@ -215,6 +241,15 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
         $this->assertStringContainsString('loading="eager"', $html);
         $this->assertStringContainsString('data-video-id="dQw4w9WgXcQ"', $html);
         $this->assertStringNotContainsString('allowfullscreen', $html);
+    }
+
+    public function testIframeAttributeFilterReceivesPlaylistContext()
+    {
+        Dj_App_Hooks::addFilter('app.plugin.embed_youtube.iframe_attributes', [$this, 'filterIframeAttributes']);
+        $html = $this->renderMarkdown('https://youtube.com/playlist?list=PL1234567890');
+
+        $this->assertStringContainsString('data-content-type="playlist"', $html);
+        $this->assertStringContainsString('data-playlist-id="PL1234567890"', $html);
     }
 
     public function testRenderedMarkdownDoesNotDependOnStorageContext()
@@ -248,6 +283,8 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
     {
         $attributes['loading'] = 'eager';
         $attributes['data-video-id'] = $ctx['video_id'];
+        $attributes['data-content-type'] = $ctx['content_type'];
+        $attributes['data-playlist-id'] = $ctx['playlist_id'];
         $attributes['allowfullscreen'] = false;
 
         return $attributes;
