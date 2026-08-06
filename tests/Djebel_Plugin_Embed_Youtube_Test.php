@@ -126,6 +126,31 @@ class Djebel_Plugin_Embed_Youtube_Test extends TestCase
         }
     }
 
+    public function testUrlParsersReturnDjebelResultObjects()
+    {
+        $video_res = $this->plugin_obj->parseVideoUrl('https://youtu.be/dQw4w9WgXcQ');
+
+        $this->assertInstanceOf(Dj_App_Result::class, $video_res);
+        $this->assertTrue($video_res->isSuccess());
+        $this->assertSame('dQw4w9WgXcQ', $video_res->video_id);
+        $this->assertSame([], $video_res->player_params);
+
+        $playlist_res = $this->plugin_obj->parsePlaylistUrl(
+            'https://youtube.com/playlist?list=PL1234567890'
+        );
+
+        $this->assertInstanceOf(Dj_App_Result::class, $playlist_res);
+        $this->assertTrue($playlist_res->isSuccess());
+        $this->assertSame('PL1234567890', $playlist_res->playlist_id);
+        $this->assertSame([], $playlist_res->player_params);
+
+        $invalid_res = $this->plugin_obj->parsePlaylistUrl('https://example.com/?list=PL1234567890');
+
+        $this->assertInstanceOf(Dj_App_Result::class, $invalid_res);
+        $this->assertTrue($invalid_res->isError());
+        $this->assertSame([], $invalid_res->data());
+    }
+
     public function testOrderedLooseListWithStartAttributeRemainsLink()
     {
         $url = 'https://youtu.be/dQw4w9WgXcQ';

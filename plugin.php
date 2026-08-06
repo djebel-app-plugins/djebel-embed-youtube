@@ -318,9 +318,10 @@ class Djebel_Plugin_Embed_Youtube
         // A playlist is the primary content whenever list= is present. Parse it
         // first so an attached video ID cannot choose the starting video.
         if (strpos($url, 'list=') !== false) {
-            $playlist_data = $this->parsePlaylistUrl($url);
+            $playlist_res = $this->parsePlaylistUrl($url);
 
-            if (!empty($playlist_data)) {
+            if ($playlist_res->isSuccess()) {
+                $playlist_data = $playlist_res->data();
                 $embed_params = [
                     'original_url' => $url,
                     'playlist_id' => $playlist_data['playlist_id'],
@@ -330,12 +331,13 @@ class Djebel_Plugin_Embed_Youtube
         }
 
         if (empty($embed_params)) {
-            $video_data = $this->parseVideoUrl($url);
+            $video_res = $this->parseVideoUrl($url);
 
-            if (empty($video_data)) {
+            if ($video_res->isError()) {
                 return $content_line;
             }
 
+            $video_data = $video_res->data();
             $embed_params = [
                 'original_url' => $url,
                 'video_id' => $video_data['video_id'],
@@ -356,18 +358,18 @@ class Djebel_Plugin_Embed_Youtube
      * Extracts a video ID and supported player parameters from a YouTube URL.
      *
      * @param string $url
-     * @return array
+     * @return Dj_App_Result video_id and player_params on success
      */
     public function parseVideoUrl($url)
     {
-        $youtube_url_data = $this->parseYoutubeUrlParts($url);
+        $res_obj = $this->parseYoutubeUrlParts($url);
 
-        if (empty($youtube_url_data)) {
-            return [];
+        if ($res_obj->isError()) {
+            return $res_obj;
         }
 
-        $url_parts = $youtube_url_data['url_parts'];
-        $is_short_host = $youtube_url_data['is_short_host'];
+        $url_parts = $res_obj->url_parts;
+        $is_short_host = $res_obj->is_short_host;
 
         $url_path = empty($url_parts['path']) ? '' : $url_parts['path'];
         $url_path = Dj_App_String_Util::trim($url_path, '/');
@@ -409,7 +411,7 @@ class Djebel_Plugin_Embed_Youtube
         }
 
         if (empty($video_id) || !is_scalar($video_id)) {
-            return [];
+            return $this->markResultError($res_obj, 'YouTube video ID not found');
         }
 
         $video_id = (string) $video_id;
@@ -417,13 +419,13 @@ class Djebel_Plugin_Embed_Youtube
         $video_id_len = strlen($video_id);
 
         if ($video_id_len < self::VIDEO_ID_MIN_LEN || $video_id_len > self::VIDEO_ID_MAX_LEN) {
-            return [];
+            return $this->markResultError($res_obj, 'Invalid YouTube video ID length');
         }
 
         $valid_video_id_len = strspn($video_id, self::YOUTUBE_ID_CHARS);
 
         if ($valid_video_id_len != $video_id_len) {
-            return [];
+            return $this->markResultError($res_obj, 'Invalid YouTube video ID');
         }
 
         // watch needed its query to find v; other routes parse only after their ID is valid.
@@ -446,10 +448,14 @@ class Djebel_Plugin_Embed_Youtube
             $player_params = $this->normalizePlayerParams($player_params_data);
         }
 
-        return [
+        $result_data = [
             'video_id' => $video_id,
             'player_params' => $player_params,
         ];
+        $res_obj->data($result_data, Dj_App_Result::OVERRIDE_FLAG);
+        $res_obj->status(true);
+
+        return $res_obj;
     }
 
     /**
@@ -459,27 +465,27 @@ class Djebel_Plugin_Embed_Youtube
      * route and any attached video therefore do not participate in playlist parsing.
      *
      * @param string $url
-     * @return array
+     * @return Dj_App_Result playlist_id and player_params on success
      */
     public function parsePlaylistUrl($url)
     {
-        $youtube_url_data = $this->parseYoutubeUrlParts($url);
+        $res_obj = $this->parseYoutubeUrlParts($url);
 
-        if (empty($youtube_url_data)) {
-            return [];
+        if ($res_obj->isError()) {
+            return $res_obj;
         }
 
-        $url_parts = $youtube_url_data['url_parts'];
+        $url_parts = $res_obj->url_parts;
 
         if (empty($url_parts['query'])) {
-            return [];
+            return $this->markResultError($res_obj, 'YouTube playlist query not found');
         }
 
         $query_params = [];
         parse_str($url_parts['query'], $query_params);
 
         if (empty($query_params['list']) || !is_scalar($query_params['list'])) {
-            return [];
+            return $this->markResultError($res_obj, 'YouTube playlist ID not found');
         }
 
         // parse_str() has already decoded the query value. Decoding it again could
@@ -488,13 +494,13 @@ class Djebel_Plugin_Embed_Youtube
         $playlist_id_len = strlen($playlist_id);
 
         if ($playlist_id_len < self::PLAYLIST_ID_MIN_LEN || $playlist_id_len > self::PLAYLIST_ID_MAX_LEN) {
-            return [];
+            return $this->markResultError($res_obj, 'Invalid YouTube playlist ID length');
         }
 
         $valid_playlist_id_len = strspn($playlist_id, self::YOUTUBE_ID_CHARS);
 
         if ($valid_playlist_id_len != $playlist_id_len) {
-            return [];
+            return $this->markResultError($res_obj, 'Invalid YouTube playlist ID');
         }
 
         // The playlist and attached video select content, not player behavior.
@@ -509,34 +515,46 @@ class Djebel_Plugin_Embed_Youtube
             $player_params = $this->normalizePlayerParams($player_params_data);
         }
 
-        return [
+        $result_data = [
             'playlist_id' => $playlist_id,
             'player_params' => $player_params,
         ];
+        $res_obj->data($result_data, Dj_App_Result::OVERRIDE_FLAG);
+        $res_obj->status(true);
+
+        return $res_obj;
     }
 
     /**
      * Validates a YouTube URL once and returns the parts needed by route parsers.
      *
      * @param string $url
-     * @return array
+     * @return Dj_App_Result url_parts and is_short_host on success
      */
     private function parseYoutubeUrlParts($url)
     {
+        $res_obj = new Dj_App_Result();
+
         if (empty($url) || !is_string($url)) {
-            return [];
+            $res_obj->msg('Empty YouTube URL');
+
+            return $res_obj;
         }
 
         $url_parts = parse_url($url);
 
         if (empty($url_parts) || empty($url_parts['scheme']) || empty($url_parts['host'])) {
-            return [];
+            $res_obj->msg('Invalid YouTube URL');
+
+            return $res_obj;
         }
 
         $scheme = strtolower($url_parts['scheme']);
 
         if ($scheme != 'http' && $scheme != 'https') {
-            return [];
+            $res_obj->msg('Unsupported YouTube URL scheme');
+
+            return $res_obj;
         }
 
         $host = strtolower($url_parts['host']);
@@ -560,13 +578,37 @@ class Djebel_Plugin_Embed_Youtube
                 break;
 
             default:
-                return [];
+                $res_obj->msg('Unsupported YouTube host');
+
+                return $res_obj;
         }
 
-        return [
+        $result_data = [
             'url_parts' => $url_parts,
             'is_short_host' => $is_short_host,
         ];
+        $res_obj->data($result_data, Dj_App_Result::OVERRIDE_FLAG);
+        $res_obj->status(true);
+
+        return $res_obj;
+    }
+
+    /**
+     * Reuses a parser result for a later validation error without another allocation.
+     *
+     * @param Dj_App_Result $res_obj
+     * @param string $message
+     * @return Dj_App_Result
+     */
+    private function markResultError($res_obj, $message)
+    {
+        // Common URL validation populated internal parsing data. It must not leak
+        // through an error returned by the more specific video or playlist parser.
+        $res_obj->clearData();
+        $res_obj->status(false);
+        $res_obj->msg($message);
+
+        return $res_obj;
     }
 
     /**

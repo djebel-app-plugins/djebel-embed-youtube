@@ -58,6 +58,25 @@ embed links. When a URL contains both a playlist and a video ID, the playlist ta
 precedence: the video ID is deliberately ignored so playback starts with the playlist's
 first video.
 
+### Programmatic parsing
+
+`parseVideoUrl()` and `parsePlaylistUrl()` return `Dj_App_Result`, following Djebel's
+standard result contract. Check the status before reading the structured payload:
+
+```php
+$plugin_obj = Djebel_Plugin_Embed_Youtube::getInstance();
+$parse_res = $plugin_obj->parsePlaylistUrl($youtube_url);
+
+if ($parse_res->isSuccess()) {
+    $playlist_id = $parse_res->playlist_id;
+    $player_params = $parse_res->player_params;
+}
+```
+
+Successful video results contain `video_id` and `player_params`; successful playlist
+results contain `playlist_id` and `player_params`. Invalid or unsupported URLs return an
+error result with no parsing payload.
+
 ## Player parameters
 
 Supported values are validated before being copied to the embed URL:
